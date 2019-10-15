@@ -36,6 +36,9 @@
 #include <sys/stat.h>
 #include <assert.h>
 #include <signal.h>
+#include <openssl/conf.h>
+#include <openssl/evp.h>
+#include <openssl/err.h>
 
 #if defined(WINDOWS)
 #include <io.h>
@@ -3922,6 +3925,102 @@ fileio_os_read (THREAD_ENTRY * thread_p, int vol_fd, void *io_page_p, size_t cou
 #endif
 }
 
+void handleErrors(void)
+{
+    ERR_print_errors_fp(stderr);
+    abort();
+}
+
+int encrypt(unsigned char *plaintext, int plaintext_len, unsigned char *key,
+            unsigned char *iv, unsigned char *ciphertext)
+{   
+    EVP_CIPHER_CTX *ctx;
+    
+    int len;
+    
+    int ciphertext_len;
+    
+    /* Create and initialise the context */
+    if(!(ctx = EVP_CIPHER_CTX_new()))
+        handleErrors();
+    
+    /*
+     * Initialise the encryption operation. IMPORTANT - ensure you use a key
+     * and IV size appropriate for your cipher
+     * In this example we are using 256 bit AES (i.e. a 256 bit key). The
+     * IV size for *most* modes is the same as the block size. For AES this
+     * is 128 bits
+     */
+    if(1 != EVP_EncryptInit_ex(ctx, EVP_aes_256_xts(), NULL, key, iv))
+        handleErrors();
+    
+    /*
+     * Provide the message to be encrypted, and obtain the encrypted output.
+     * EVP_EncryptUpdate can be called multiple times if necessary
+     */
+    if(1 != EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, plaintext_len))
+        handleErrors();
+    ciphertext_len = len;
+    
+    /*
+     * Finalise the encryption. Further ciphertext bytes may be written at
+     * this stage.
+     */
+    if(1 != EVP_EncryptFinal_ex(ctx, ciphertext + len, &len))
+        handleErrors();
+    ciphertext_len += len;
+    
+    /* Clean up */
+    EVP_CIPHER_CTX_free(ctx);
+    
+    return ciphertext_len;
+}
+
+int decrypt(unsigned char *ciphertext, int ciphertext_len, unsigned char *key,
+            unsigned char *iv, unsigned char *plaintext)
+{
+    EVP_CIPHER_CTX *ctx;
+
+    int len;
+
+    int plaintext_len;
+
+    /* Create and initialise the context */
+    if(!(ctx = EVP_CIPHER_CTX_new()))
+        handleErrors();
+
+    /*
+     * Initialise the decryption operation. IMPORTANT - ensure you use a key
+     * and IV size appropriate for your cipher
+     * In this example we are using 256 bit AES (i.e. a 256 bit key). The
+     * IV size for *most* modes is the same as the block size. For AES this
+     * is 128 bits
+     */
+    if(1 != EVP_DecryptInit_ex(ctx, EVP_aes_256_xts(), NULL, key, iv))
+        handleErrors();
+
+    /*
+     * Provide the message to be decrypted, and obtain the plaintext output.
+     * EVP_DecryptUpdate can be called multiple times if necessary.
+     */
+    if(1 != EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext, ciphertext_len))
+        handleErrors();
+    plaintext_len = len;
+
+    /*
+     * Finalise the decryption. Further plaintext bytes may be written at
+     * this stage.
+     */
+    if(1 != EVP_DecryptFinal_ex(ctx, plaintext + len, &len))
+        handleErrors();
+    plaintext_len += len;
+
+    /* Clean up */
+    EVP_CIPHER_CTX_free(ctx);
+
+    return plaintext_len;
+}
+
 /*
  * fileio_read () - READ A PAGE FROM DISK
  *   return:
@@ -3944,7 +4043,11 @@ fileio_read (THREAD_ENTRY * thread_p, int vol_fd, void *io_page_p, PAGEID page_i
   off_t offset = FILEIO_GET_FILE_SIZE (page_size, page_id);
   ssize_t nbytes;
   bool is_retry = true;
+  int ciphertext_len = 0;
 
+  unsigned char encrypted_page[page_size]; // TDE
+  unsigned char *key = (unsigned char *)"0123456789012345678901234567890112345678901234567890123456789010"; // 512byte key for aes_xts_256
+  unsigned char tweak[16] = {0,}; // 128 bite tweak for xts
 #if defined (EnableThreadMonitoring)
   if (0 < prm_get_integer_value (PRM_ID_MNT_WAITING_THREAD))
     {
@@ -3955,8 +4058,9 @@ fileio_read (THREAD_ENTRY * thread_p, int vol_fd, void *io_page_p, PAGEID page_i
   while (is_retry == true)
     {
       is_retry = false;
-
-      nbytes = fileio_os_read (thread_p, vol_fd, io_page_p, page_size, offset);
+     
+      //nbytes = fileio_os_read (thread_p, vol_fd, io_page_p, page_size, offset);
+      nbytes = fileio_os_read (thread_p, vol_fd, encrypted_page, page_size, offset);
       if (nbytes != (ssize_t) page_size)
 	{
 	  if (nbytes == 0)
@@ -3979,7 +4083,10 @@ fileio_read (THREAD_ENTRY * thread_p, int vol_fd, void *io_page_p, PAGEID page_i
 	    }
 	}
     }
-
+    // memcpy(tweak, &vol_fd, sizeof(int));
+    memcpy(tweak+sizeof(int), &page_id, sizeof(PAGEID));
+    ciphertext_len = decrypt (encrypted_page, page_size, key, tweak, (unsigned char*)io_page_p);
+	assert (ciphertext_len == page_size);
 #if defined (EnableThreadMonitoring)
   if (0 < prm_get_integer_value (PRM_ID_MNT_WAITING_THREAD))
     {
@@ -4122,6 +4229,7 @@ fileio_os_write (THREAD_ENTRY * thread_p, int vol_fd, void *io_page_p, size_t co
 #endif
 }
 
+
 /*
  * fileio_write () - WRITE A PAGE TO DISK
  *   return: io_page_p on success, NULL on failure
@@ -4145,19 +4253,27 @@ fileio_write (THREAD_ENTRY * thread_p, int vol_fd, void *io_page_p, PAGEID page_
   ssize_t nbytes_written;
   off_t offset = FILEIO_GET_FILE_SIZE (page_size, page_id);
   bool is_retry = true;
-
+  unsigned char encrypted_page[page_size]; // TDE
+  int ciphertext_len = 0;
+  unsigned char *key = (unsigned char *)"0123456789012345678901234567890112345678901234567890123456789010"; // 512byte key for aes_xts_256
+  unsigned char tweak[16] = {0,}; // 128 bite tweak for xts
 #if defined (EnableThreadMonitoring)
   if (0 < prm_get_integer_value (PRM_ID_MNT_WAITING_THREAD))
     {
       tsc_getticks (&start_tick);
     }
 #endif
-
+  
+  // assert (page_size % block_size == 0 );
+  // memcpy(tweak, &vol_fd, sizeof(int)); 나중에각 볼륨id도 teak에 넣어야할듯
+  memcpy(tweak+sizeof(int), &page_id, sizeof(PAGEID));
+  ciphertext_len = encrypt ((unsigned char*)io_page_p, page_size, key, tweak, encrypted_page); // io_page_p가복사해두는 버퍼라고 보장이 된다면 걍 덮어도 될듯
+  assert (ciphertext_len == page_size);
   while (is_retry == true)
     {
       is_retry = false;
-
-      nbytes_written = fileio_os_write (thread_p, vol_fd, io_page_p, page_size, offset);
+      nbytes_written = fileio_os_write (thread_p, vol_fd, encrypted_page, ciphertext_len, offset);
+	  // nbytes_written = fileio_os_write (thread_p, vol_fd, io_page_p, page_size, offset);
       if (nbytes_written != (ssize_t) page_size)
 	{
 	  if (errno == EINTR)
