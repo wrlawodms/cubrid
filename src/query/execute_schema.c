@@ -8881,16 +8881,19 @@ do_create_entity (PARSER_CONTEXT * parser, PT_NODE * node)
 	      do_flush_class_mop = true;
 	    }
 	}
-      if (tbl_opt_encrypt)
+      if (true)			// tbl_opt_encrypt)
 	{
-	  encrypt_node = tbl_opt_encrypt->info.table_option.val;
-	  assert (encrypt_node != NULL && encrypt_node->node_type == PT_VALUE
-		  && encrypt_node->type_enum == PT_TYPE_INTEGER);
-	  tde_algo_opt = encrypt_node->info.value.data_value.i;
+//        encrypt_node = tbl_opt_encrypt->info.table_option.val;
+//        assert (encrypt_node != NULL && encrypt_node->node_type == PT_VALUE
+//                && encrypt_node->type_enum == PT_TYPE_INTEGER);
+//        t$de_algo_opt = encrypt_node->info.value.data_value.i;
+
 	  /*
 	   *  -1 means using deafult encryption algorithm.
 	   *  Other values but -1, TDE_ALGORITHM_AES, TDE_ALGORITHM_ARIA has been denied by parser.
 	   */
+
+	  tde_algo_opt = -1;
 	  if (tde_algo_opt == -1)
 	    {
 	      tde_algo = (TDE_ALGORITHM) prm_get_integer_value (PRM_ID_TDE_DEFAULT_ALGORITHM);
@@ -8899,6 +8902,7 @@ do_create_entity (PARSER_CONTEXT * parser, PT_NODE * node)
 	    {
 	      tde_algo = (TDE_ALGORITHM) tde_algo_opt;
 	    }
+
 	  error = sm_set_class_tde_algorithm (class_obj, tde_algo);
 	  if (error != NO_ERROR)
 	    {
